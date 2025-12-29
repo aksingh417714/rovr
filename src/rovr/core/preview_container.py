@@ -158,6 +158,8 @@ class PreviewContainer(Container):
 
         if should_cancel():
             return
+        self.log("show_pdf_preview called, path: ", self._current_file_path, "current_page: ", self.pdf.current_page)
+        
 
         # Convert PDF to images if not already done
         if self.pdf.images is None:
