@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from os import path
 
 import textual_image.widget as timg
-from pdf2image import convert_from_path
+from pdf2image import convert_from_path, pdfinfo_from_path
 from PIL import Image, UnidentifiedImageError
 from PIL.Image import Image as PILImage
 from rich.text import Text
@@ -159,17 +159,21 @@ class PreviewContainer(Container):
         if should_cancel():
             return
         self.log("show_pdf_preview called, path: ", self._current_file_path, "current_page: ", self.pdf.current_page)
+        BATCH_SIZE = 5
         
-
         # Convert PDF to images if not already done
         if self.pdf.images is None:
             try:
+                # should this be also in a worker?
+                self.pdf.total_pages = pdfinfo_from_path(str(self._current_file_path),
+                    poppler_path=config["plugins"]["poppler"]["poppler_folder"] or None)["Pages"]
                 worker: Worker = self.app.run_in_thread(
                     convert_from_path,
                     str(self._current_file_path),
                     transparent=False,
                     fmt="png",
                     single_file=False,
+                    last_page=min(self.pdf.total_pages, BATCH_SIZE),
                     use_pdftocairo=config["plugins"]["poppler"]["use_pdftocairo"],
                     thread_count=config["plugins"]["poppler"]["threads"],
                     poppler_path=config["plugins"]["poppler"]["poppler_folder"] or None,
@@ -193,9 +197,52 @@ class PreviewContainer(Container):
                 )
                 return
 
+            self.log("show_pdf_preview called, count: ", self.pdf.total_pages,
+                "results len", len(result))
+
+
             self.pdf.images = result
-            self.pdf.total_pages = len(self.pdf.images)
             self.pdf.current_page = 0
+        
+        elif len(self.pdf.images) < self.pdf.total_pages and self.pdf.current_page >= len(self.pdf.images) :
+            self.log("triggering next batch, cur_pages ", 
+                len(self.pdf.images), "last_page", 
+                min(self.pdf.total_pages, len(self.pdf.images) + BATCH_SIZE))
+            try:
+                worker: Worker = self.app.run_in_thread(
+                    convert_from_path,
+                    str(self._current_file_path),
+                    transparent=False,
+                    fmt="png",
+                    single_file=False,
+                    first_page=len(self.pdf.images),
+                    last_page=min(self.pdf.total_pages, len(self.pdf.images) + BATCH_SIZE),
+                    use_pdftocairo=config["plugins"]["poppler"]["use_pdftocairo"],
+                    thread_count=config["plugins"]["poppler"]["threads"],
+                    poppler_path=config["plugins"]["poppler"]["poppler_folder"] or None,
+                )
+                result = await worker.wait()
+                if isinstance(result, Exception):
+                    raise result
+                elif len(result) == 0:
+                    raise ValueError(
+                        "Obtained 0 pages from Poppler. Something may have gone wrong..."
+                    )
+            except Exception as exc:
+                if should_cancel():
+                    return
+                await self.remove_children()
+                await self.mount(
+                    Static(
+                        f"{type(exc).__name__}: {str(exc)}",
+                        id="text_preview",
+                    )
+                )
+                return
+            
+            self.log.info("Loaded page : ", len(result))
+            self.pdf.images += result
+
 
         if should_cancel():
             return
