@@ -4,6 +4,7 @@ from os import path
 from time import sleep, time
 from typing import cast
 
+
 import textual_image.widget as timg
 from pdf2image import convert_from_path, pdfinfo_from_path
 from PIL import Image, UnidentifiedImageError
@@ -30,9 +31,13 @@ from rovr.variables.constants import PreviewContainerTitles, config, file_execut
 
 titles = PreviewContainerTitles()
 
+idMax=0
+popid=0
 
 @dataclass
 class PDFHandler:
+    # It is 0 indexed, although most poppler functions
+    # like convert_from_path expects 1 based indexing
     current_page: int = 0
     total_pages: int = 0
     images: list[PILImage] | None = None
@@ -40,7 +45,16 @@ class PDFHandler:
     def count_loaded(self):
         # `self.pdf.count_loaded()` is more clear and abstracted then len(self.pdf.pages)
         return 0 if self.images is None else len(self.images)
+    def should_load_next_batch(self):
+        return self.count_loaded() < self.total_pages and \
+            self.current_page >= self.count_loaded()
 
+    def get_last_page_to_load(self) -> int:
+        # We should load till current page, if user scrolls too fast and reaches
+        # beyond the batch before our load. This can happen on slow loads, and smaller batch sizes
+        last_page = max(self.current_page+1, 
+            self.count_loaded() + PreviewContainer.PDF_BATCH_SIZE)
+        return min(last_page, self.total_pages)
 
 class LoadingPreview(Static):
     """Make the preview look empty"""
@@ -240,22 +254,52 @@ class PreviewContainer(Container):
         if self.any_in_queue():
             return
 
+    def load_pdf_pages(self, first_page : int=None, last_page : int=None) -> list[Image.Image]:
+        global popid
+        popid = popid + 1
+        cur_popid = popid
+        poppler_folder: str | None = cast(
+            str | None, config["plugins"]["poppler"]["poppler_folder"]
+        )
+        if poppler_folder == "":
+            poppler_folder = None
+        self.log(f"[P{cur_popid}] load_pdf_pages called with first_page: {first_page}, last_page: {last_page}")
+        result = convert_from_path(
+            self._current_file_path,
+            transparent=False,
+            fmt="png",
+            single_file=False,
+            first_page=first_page,
+            last_page=last_page,
+            use_pdftocairo=config["plugins"]["poppler"]["use_pdftocairo"],
+            thread_count=config["plugins"]["poppler"]["threads"],
+            poppler_path=poppler_folder,  # type: ignore[arg-type]
+        )
+        if len(result) == 0:
+            raise ValueError(
+                "Obtained 0 pages from Poppler. Something may have gone wrong..."
+            )
+        self.log(f"[P{cur_popid}] load_pdf_pages returning {len(result)} pages")
+        return result
+        
+
     def show_pdf_preview(self, depth: int = 0) -> None:
         """Show PDF preview. Runs in a thread.
 
         Raises:
             ValueError: If PDF conversion returns 0 pages.
         """
+        global idMax
+        idMax = idMax + 1
+        id = idMax
+        self.log(f"[{id}] show_pdf_preview called, path: ", self._current_file_path,
+                 "current_page: ", self.pdf.current_page,
+                 "total_page: ", self.pdf.total_pages, 
+                 "loaded: ", self.pdf.count_loaded())
         self.app.call_from_thread(setattr, self, "border_title", titles.pdf)
 
         if self.any_in_queue() or self._current_file_path is None:
             return
-        self.log("show_pdf_preview called, path: ", self._current_file_path, 
-                 "current_page: ", self.pdf.current_page,
-                 "total_page: ", self.pdf.total_pages, "loaded: ", self.pdf.count_loaded())
-        
-        
-
         
         # Convert PDF to images if not already done
         if self.pdf.images is None:
@@ -267,20 +311,7 @@ class PreviewContainer(Container):
             try:
                 self.pdf.total_pages = pdfinfo_from_path(str(self._current_file_path),
                     poppler_path=config["plugins"]["poppler"]["poppler_folder"] or None)["Pages"]
-                result = convert_from_path(
-                    self._current_file_path,
-                    transparent=False,
-                    fmt="png",
-                    single_file=False,
-                    last_page=min(self.pdf.total_pages, PreviewContainer.PDF_BATCH_SIZE),
-                    use_pdftocairo=config["plugins"]["poppler"]["use_pdftocairo"],
-                    thread_count=config["plugins"]["poppler"]["threads"],
-                    poppler_path=poppler_folder,  # type: ignore[arg-type]
-                )
-                if len(result) == 0:
-                    raise ValueError(
-                        "Obtained 0 pages from Poppler. Something may have gone wrong\u2026"
-                    )
+                result = self.load_pdf_pages(last_page=min(self.pdf.total_pages, PreviewContainer.PDF_BATCH_SIZE))
             except Exception as exc:
                 if self.any_in_queue():
                     return
@@ -290,44 +321,19 @@ class PreviewContainer(Container):
                     Static(f"{type(exc).__name__}: {str(exc)}", classes="special"),
                 )
                 return
-
-            self.log("show_pdf_preview called, total page count: ", self.pdf.total_pages,
-                "paged loaded: ", len(result))
-
-
+            self.log(f"[{id}] loaded {len(result)} pages")
             self.pdf.images = result
             self.pdf.current_page = 0
         
-        elif self.pdf.count_loaded() < self.pdf.total_pages and \
-            self.pdf.current_page >= self.pdf.count_loaded() :
+        elif self.pdf.should_load_next_batch() :
             self.post_message(self.SetLoading(True))
-            
-            poppler_folder: str | None = cast(
-                str | None, config["plugins"]["poppler"]["poppler_folder"]
-            )
-            if poppler_folder == "":
-                poppler_folder = None
-            #self.post_message(self.SetLoading(True))
-            self.log("triggering next batch, cur_pages ", 
-                self.pdf.count_loaded(), "last_page", 
-                min(self.pdf.total_pages, self.pdf.count_loaded() + PreviewContainer.PDF_BATCH_SIZE))
+            self.log.info(f"[{id}] Requesting a fetch, last_page = {self.pdf.get_last_page_to_load()}")
+
             try:
-                result = convert_from_path(
-                    self._current_file_path,
-                    transparent=False,
-                    fmt="png",
-                    single_file=False,
-                    first_page=len(self.pdf.images)+1,
-                    last_page=min(self.pdf.total_pages, self.pdf.count_loaded() + PreviewContainer.PDF_BATCH_SIZE),
-                    use_pdftocairo=config["plugins"]["poppler"]["use_pdftocairo"],
-                    thread_count=config["plugins"]["poppler"]["threads"],
-                    poppler_path=poppler_folder,  # type: ignore[arg-type]
-                )
-                if len(result) == 0:
-                    raise ValueError(
-                        "Obtained 0 pages from Poppler. Something may have gone wrong..."
-                    )
+                result = self.load_pdf_pages(first_page=len(self.pdf.images)+1,
+                    last_page=self.pdf.get_last_page_to_load())
             except Exception as exc:
+                # As fetch failed, current_page will have to be set to 
                 if self.any_in_queue():
                     return
                 self.app.call_from_thread(self.remove_children)
@@ -337,16 +343,22 @@ class PreviewContainer(Container):
                 )
                 return
             
-            self.log.info("Loaded page : ", len(result))
+            self.log.info(f"[{id}] Fetched {len(result)} new pages,"+
+                f" we have {self.pdf.count_loaded()} pages now, current_page = {self.pdf.current_page}")
+            
             self.pdf.images += result
-            #self.post_message(self.SetLoading(False))
             self.call_later(lambda: self.post_message(self.SetLoading(False)))
-                    
 
 
         if self.any_in_queue():
+            self.log.info(f"[{id}] kicked")
             return
 
+        # This is kind of an hack, if user scrolls too fast, with less batchsize,
+        # when current_page exceeded loaded pages
+        if self.pdf.current_page >= self.pdf.count_loaded():
+            self.log.info(f"[{id}] fucked")
+            return
         current_image = self.pdf.images[self.pdf.current_page]
 
         self.app.call_from_thread(
