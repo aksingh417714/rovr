@@ -39,7 +39,7 @@ class PDFHandler:
 
     def count_loaded(self):
         # `self.pdf.count_loaded()` is more clear and abstracted then len(self.pdf.pages)
-        return len(self.images)
+        return 0 if self.images is None else len(self.images)
 
 
 class LoadingPreview(Static):
