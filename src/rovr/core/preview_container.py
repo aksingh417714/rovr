@@ -62,6 +62,9 @@ class LoadingPreview(Static):
 
 
 class PreviewContainer(Container):
+
+    PDF_BATCH_SIZE = 1
+
     @dataclass
     class SetLoading(Message):
         """
@@ -251,7 +254,7 @@ class PreviewContainer(Container):
                  "current_page: ", self.pdf.current_page,
                  "total_page: ", self.pdf.total_pages, "loaded: ", self.pdf.count_loaded())
         
-        BATCH_SIZE = 1
+        
 
         
         # Convert PDF to images if not already done
@@ -269,7 +272,7 @@ class PreviewContainer(Container):
                     transparent=False,
                     fmt="png",
                     single_file=False,
-                    last_page=min(self.pdf.total_pages, BATCH_SIZE),
+                    last_page=min(self.pdf.total_pages, PreviewContainer.PDF_BATCH_SIZE),
                     use_pdftocairo=config["plugins"]["poppler"]["use_pdftocairo"],
                     thread_count=config["plugins"]["poppler"]["threads"],
                     poppler_path=poppler_folder,  # type: ignore[arg-type]
@@ -297,6 +300,8 @@ class PreviewContainer(Container):
         
         elif self.pdf.count_loaded() < self.pdf.total_pages and \
             self.pdf.current_page >= self.pdf.count_loaded() :
+            self.post_message(self.SetLoading(True))
+            
             poppler_folder: str | None = cast(
                 str | None, config["plugins"]["poppler"]["poppler_folder"]
             )
@@ -305,7 +310,7 @@ class PreviewContainer(Container):
             #self.post_message(self.SetLoading(True))
             self.log("triggering next batch, cur_pages ", 
                 self.pdf.count_loaded(), "last_page", 
-                min(self.pdf.total_pages, self.pdf.count_loaded() + BATCH_SIZE))
+                min(self.pdf.total_pages, self.pdf.count_loaded() + PreviewContainer.PDF_BATCH_SIZE))
             try:
                 result = convert_from_path(
                     self._current_file_path,
@@ -313,7 +318,7 @@ class PreviewContainer(Container):
                     fmt="png",
                     single_file=False,
                     first_page=len(self.pdf.images)+1,
-                    last_page=min(self.pdf.total_pages, self.pdf.count_loaded() + BATCH_SIZE),
+                    last_page=min(self.pdf.total_pages, self.pdf.count_loaded() + PreviewContainer.PDF_BATCH_SIZE),
                     use_pdftocairo=config["plugins"]["poppler"]["use_pdftocairo"],
                     thread_count=config["plugins"]["poppler"]["threads"],
                     poppler_path=poppler_folder,  # type: ignore[arg-type]
@@ -335,7 +340,8 @@ class PreviewContainer(Container):
             self.log.info("Loaded page : ", len(result))
             self.pdf.images += result
             #self.post_message(self.SetLoading(False))
-
+            self.call_later(lambda: self.post_message(self.SetLoading(False)))
+                    
 
 
         if self.any_in_queue():
