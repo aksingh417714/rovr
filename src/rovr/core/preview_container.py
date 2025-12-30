@@ -252,6 +252,7 @@ class PreviewContainer(Container):
                  "total_page: ", self.pdf.total_pages, "loaded: ", self.pdf.count_loaded())
         
         BATCH_SIZE = 1
+
         
         # Convert PDF to images if not already done
         if self.pdf.images is None:
@@ -296,6 +297,11 @@ class PreviewContainer(Container):
         
         elif self.pdf.count_loaded() < self.pdf.total_pages and \
             self.pdf.current_page >= self.pdf.count_loaded() :
+            poppler_folder: str | None = cast(
+                str | None, config["plugins"]["poppler"]["poppler_folder"]
+            )
+            if poppler_folder == "":
+                poppler_folder = None
             #self.post_message(self.SetLoading(True))
             self.log("triggering next batch, cur_pages ", 
                 self.pdf.count_loaded(), "last_page", 
