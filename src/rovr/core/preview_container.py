@@ -37,6 +37,10 @@ class PDFHandler:
     total_pages: int = 0
     images: list[PILImage] | None = None
 
+    def count_loaded(self):
+        # `self.pdf.count_loaded()` is more clear and abstracted then len(self.pdf.pages)
+        return len(self.images)
+
 
 class LoadingPreview(Static):
     """Make the preview look empty"""
@@ -243,8 +247,11 @@ class PreviewContainer(Container):
 
         if self.any_in_queue() or self._current_file_path is None:
             return
-        self.log("show_pdf_preview called, path: ", self._current_file_path, "current_page: ", self.pdf.current_page)
-        BATCH_SIZE = 5
+        self.log("show_pdf_preview called, path: ", self._current_file_path, 
+                 "current_page: ", self.pdf.current_page,
+                 "total_page: ", self.pdf.total_pages, "loaded: ", self.pdf.count_loaded())
+        
+        BATCH_SIZE = 1
         
         # Convert PDF to images if not already done
         if self.pdf.images is None:
@@ -280,25 +287,27 @@ class PreviewContainer(Container):
                 )
                 return
 
-            self.log("show_pdf_preview called, count: ", self.pdf.total_pages,
-                "results len", len(result))
+            self.log("show_pdf_preview called, total page count: ", self.pdf.total_pages,
+                "paged loaded: ", len(result))
 
 
             self.pdf.images = result
             self.pdf.current_page = 0
         
-        elif len(self.pdf.images) < self.pdf.total_pages and self.pdf.current_page >= len(self.pdf.images) :
+        elif self.pdf.count_loaded() < self.pdf.total_pages and \
+            self.pdf.current_page >= self.pdf.count_loaded() :
+            #self.post_message(self.SetLoading(True))
             self.log("triggering next batch, cur_pages ", 
-                len(self.pdf.images), "last_page", 
-                min(self.pdf.total_pages, len(self.pdf.images) + BATCH_SIZE))
+                self.pdf.count_loaded(), "last_page", 
+                min(self.pdf.total_pages, self.pdf.count_loaded() + BATCH_SIZE))
             try:
                 result = convert_from_path(
                     self._current_file_path,
                     transparent=False,
                     fmt="png",
                     single_file=False,
-                    first_page=len(self.pdf.images),
-                    last_page=min(self.pdf.total_pages, len(self.pdf.images) + BATCH_SIZE),
+                    first_page=len(self.pdf.images)+1,
+                    last_page=min(self.pdf.total_pages, self.pdf.count_loaded() + BATCH_SIZE),
                     use_pdftocairo=config["plugins"]["poppler"]["use_pdftocairo"],
                     thread_count=config["plugins"]["poppler"]["threads"],
                     poppler_path=poppler_folder,  # type: ignore[arg-type]
@@ -319,6 +328,8 @@ class PreviewContainer(Container):
             
             self.log.info("Loaded page : ", len(result))
             self.pdf.images += result
+            #self.post_message(self.SetLoading(False))
+
 
 
         if self.any_in_queue():
@@ -852,6 +863,7 @@ class PreviewContainer(Container):
         """
         Update the preview UI. Runs in a thread, uses call_from_thread for UI ops.
         """
+        self.log("update_ui called")
         self._current_file_path = file_path
         self._current_content = content
         self._mime_type = mime_type
